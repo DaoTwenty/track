@@ -26,7 +26,7 @@
 ### From source using `Makefile`
 
 ```bash
-git clone https://github.com/yourusername/track.git
+git clone https://github.com/DaoTwenty/track.git
 cd track
 make install
 ```
@@ -42,6 +42,6 @@ make uninstall
 ### Via Homebrew
 
 ```bash
-brew tap yourusername/track
+brew tap DaoTwenty/track
 brew install track
 ```
