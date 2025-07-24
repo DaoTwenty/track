@@ -2,7 +2,7 @@ class Track < Formula
   desc "CLI project time tracking tool"
   homepage "https://github.com/DaoTwenty/track"
   url "https://github.com/DaoTwenty/track/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 "616a1504804b7c6b909cb6fe8b465bf425de6dfc262d42bee60046768cbcb566"
+  sha256 "11285b1eda487fc164efe7af747d55e00278132c681cdb2bcdf7aeecc88dcd3f"
   license "MIT"
 
   def install
