@@ -1,0 +1,34 @@
+# Build and install artifacts
+/bin/
+/dist/
+/build/
+
+# macOS system files
+.DS_Store
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+*~
+
+# Generated versioned tarballs
+*.tar.gz
+*.zip
+
+# Python or Node cache (if ever used)
+__pycache__/
+node_modules/
+
+# Homebrew install cache
+*.bottle.*
+
+# Ignore the final installed binary if it's generated
+track
+
+# VSCode or JetBrains IDE folders (optional)
+.vscode/
+.idea/
