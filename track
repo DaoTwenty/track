@@ -1,0 +1,559 @@
+#!/usr/bin/env bash
+
+# Configuration
+TRACKER_DIR="$HOME/.project_tracker"
+LOG_FILE="$TRACKER_DIR/timelog.jsonl"
+PROJECTS_FILE="$TRACKER_DIR/registered_projects.txt"
+
+mkdir -p "$TRACKER_DIR"
+touch "$LOG_FILE"
+touch "$PROJECTS_FILE"
+
+# Detect date flavor once
+if date -d "2020-01-01" +%s >/dev/null 2>&1; then
+  IS_GNU_DATE=true
+else
+  IS_GNU_DATE=false
+fi
+
+VERSION="__VERSION__"
+
+show_help() {
+  cat <<EOF
+Usage: $0 [options] <project>
+
+Options:
+  -r <project>     Register a new project
+  -l <project>     Show total time worked on a project
+  -a               List all registered projects
+  -d <project>     Delete the last session (activated+deactivated) for a project
+  -m <project> <duration>  [--from YYYY-MM-DDTHH:MM:SS] [-ca comment] [-cd comment] Manually add time (e.g. 1h30m) to a project
+  -s <project> [--date YYYY-MM-DD]  Show daily/weekly time summary
+  -rpt <project> [--start YYYY-MM-DDTHH:MM:SS] [--end YYYY-MM-DDTHH:MM:SS] [-d direcory] Generate CSV report
+  -v               Print version
+  -h               Show this help message
+  <project> [-c comment] Toggles tracking (activate/deactivate) for a registered project
+  
+EOF
+}
+
+register_project() {
+  local project="$1"
+  if grep -Fxq "$project" "$PROJECTS_FILE"; then
+    echo "Project '$project' is already registered."
+  else
+    echo "$project" >> "$PROJECTS_FILE"
+    echo "Project '$project' registered."
+  fi
+}
+
+project_exists() {
+  grep -Fxq "$1" "$PROJECTS_FILE"
+}
+
+log_event() {
+  local project="$1"
+  local state="$2"
+  local timestamp="$3"
+  local comment="$4"
+
+  [[ -z "$timestamp" ]] && timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local log_entry="{\"project\": \"$project\", \"state\": \"$state\", \"timestamp\": \"$timestamp\""
+
+  if [[ -n "$comment" ]]; then
+    log_entry+=", \"comment\": \"${comment//\"/\\\"}\""
+  fi
+
+  log_entry+="}"
+  echo "$log_entry" >> "$LOG_FILE"
+}
+
+get_last_state() {
+  grep "\"project\": \"$1\"" "$LOG_FILE" | tail -n 1 | grep -o '"state": *"[^"]*"' | cut -d '"' -f4
+}
+
+calculate_total_time() {
+  local project="$1"
+  local total_seconds=0
+  local start_time=""
+
+  while read -r line; do
+    state=$(echo "$line" | grep -o '"state": *"[^"]*"' | cut -d '"' -f4)
+    timestamp=$(echo "$line" | grep -o '"timestamp": *"[^"]*"' | cut -d '"' -f4)
+
+    if [[ "$state" == "activated" ]]; then
+      start_time="$timestamp"
+    elif [[ "$state" == "deactivated" && -n "$start_time" ]]; then
+      if $IS_GNU_DATE; then
+        start_sec=$(date -d "$start_time" +%s)
+        end_sec=$(date -d "$timestamp" +%s)
+      else
+        start_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" +%s)
+        end_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s)
+      fi
+      (( total_seconds += end_sec - start_sec ))
+      start_time=""
+    fi
+  done < <(grep "\"project\": \"$project\"" "$LOG_FILE")
+
+  hours=$(( total_seconds / 3600 ))
+  minutes=$(( (total_seconds % 3600) / 60 ))
+  seconds=$(( total_seconds % 60 ))
+
+  echo "Total time on project '$project': ${hours}h ${minutes}m ${seconds}s"
+}
+
+
+list_projects() {
+  if [[ ! -s "$PROJECTS_FILE" ]]; then
+    echo "No projects registered."
+    return
+  fi
+  echo "Registered projects:"
+  sort "$PROJECTS_FILE"
+}
+
+delete_last_session() {
+  local project="$1"
+  local lines
+  lines=$(grep -n "\"project\": \"$project\"" "$LOG_FILE" | tail -n 2 | cut -d: -f1 | sort -r)
+  if [[ $(echo "$lines" | wc -l) -ne 2 ]]; then
+    echo "Not enough entries to delete last session for '$project'."
+    return 1
+  fi
+
+  echo "About to delete the last session for '$project':"
+    grep "\"project\": \"$project\"" "$LOG_FILE" | tail -n 2
+    read -p "Are you sure? [y/N]: " confirm
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    while read -r line_num; do
+      sed -i '' "${line_num}d" "$LOG_FILE" 2>/dev/null || sed -i "${line_num}d" "$LOG_FILE"
+    done <<< "$lines"
+    echo "Deleted last session for '$project'."
+  else
+    echo "Aborted deletion."
+  fi
+}
+
+parse_duration() {
+  local input="$1"
+  local h m total=0
+  h=$(echo "$input" | grep -o '[0-9]\+h' | grep -o '[0-9]\+')
+  m=$(echo "$input" | grep -o '[0-9]\+m' | grep -o '[0-9]\+')
+
+  h=${h:-0}
+  m=${m:-0}
+
+  total=$((h * 3600 + m * 60))
+  echo "$total"
+}
+
+manual_add_time() {
+  local project="$1"
+  local duration_str="$2"
+  local start_arg="$3"
+  local comment_a="$4"
+  local comment_d="$5"
+
+  local seconds start_ts end_ts
+
+  seconds=$(parse_duration "$duration_str")
+  if [[ $seconds -le 0 ]]; then
+    echo "Invalid duration format. Use something like '1h30m'."
+    return 1
+  fi
+
+  if [[ -n "$start_arg" ]]; then
+    # Format: 2025-07-23T14:00:00
+    if ! date -d "$start_arg" +%s >/dev/null 2>&1 && ! date -j -f "%Y-%m-%dT%H:%M:%S" "$start_arg" +%s >/dev/null 2>&1; then
+      echo "Invalid --from time format. Use: '2025-07-23T14:00:00'"
+      return 1
+    fi
+    start_ts=$(date -u -d "$start_arg" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$start_arg" +"%Y-%m-%dT%H:%M:%SZ")
+    end_ts=$(date -u -d "$start_ts + $seconds seconds" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" -v+${seconds}S "$start_ts" +"%Y-%m-%dT%H:%M:%SZ")
+  else
+    end_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    start_ts=$(date -u -d "-$seconds seconds" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -v -"${seconds}S" +"%Y-%m-%dT%H:%M:%SZ")
+  fi
+
+  log_event "$project" "activated" "$start_ts" "$comment_a"
+  log_event "$project" "deactivated" "$end_ts" "$comment_d"
+
+  echo "Manually added $duration_str to '$project' from ${start_ts}."
+}
+
+
+calculate_summary() {
+  local project="$1"
+  local filter_date="$2"
+  local today=$(date -u +"%Y-%m-%d")
+
+  if $IS_GNU_DATE; then
+    # GNU date
+    week_start=$(date -u -d "$today -$(date -u +%u) days +1 day" +"%Y-%m-%d")
+  else
+    # BSD/macOS date
+    weekday=$(date +%u)
+    offset=$(( weekday - 1 ))
+    week_start=$(date -u -v "-${offset}d" +%Y-%m-%d)
+  fi
+
+  local start_time=""
+  local total_day=0
+  local total_week=0
+
+  while read -r line; do
+    state=$(echo "$line" | grep -o '"state": *"[^"]*"' | cut -d '"' -f4)
+    timestamp=$(echo "$line" | grep -o '"timestamp": *"[^"]*"' | cut -d '"' -f4)
+    date_only=${timestamp:0:10}
+
+    if [[ "$state" == "activated" ]]; then
+      start_time="$timestamp"
+    elif [[ "$state" == "deactivated" && -n "$start_time" ]]; then
+      if $IS_GNU_DATE; then
+        start_sec=$(date -d "$start_time" +%s)
+        end_sec=$(date -d "$timestamp" +%s)
+      else
+        start_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" +%s)
+        end_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s)
+      fi
+      duration=$((end_sec - start_sec))
+
+      if [[ -z "$filter_date" || "$date_only" == "$filter_date" ]]; then
+        (( total_day += duration ))
+      fi
+
+      if [[ "$date_only" > "$week_start" || "$date_only" == "$week_start" ]]; then
+        (( total_week += duration ))
+      fi
+
+      start_time=""
+    fi
+  done < <(grep "\"project\": \"$project\"" "$LOG_FILE")
+
+  format_time() {
+    local sec=$1
+    local h=$(( sec / 3600 ))
+    local m=$(( (sec % 3600) / 60 ))
+    local s=$(( sec % 60 ))
+    echo "${h}h ${m}m ${s}s"
+  }
+
+  if [[ -n "$filter_date" ]]; then
+    echo "Summary for $project on $filter_date: $(format_time $total_day)"
+  else
+    echo "Summary for $project:"
+    echo "  Today:  $(format_time $total_day)"
+    echo "  Week:   $(format_time $total_week)"
+  fi
+}
+
+
+daily_breakdown() {
+  local project="$1"
+  local days="$2"  # 1 for today, 7 for past week
+  declare -A durations
+
+  local start_time=""
+  while read -r line; do
+    state=$(echo "$line" | grep -o '"state": *"[^"]*"' | cut -d '"' -f4)
+    timestamp=$(echo "$line" | grep -o '"timestamp": *"[^"]*"' | cut -d '"' -f4)
+    date_only=${timestamp:0:10}
+
+    if [[ "$state" == "activated" ]]; then
+      start_time="$timestamp"
+    elif [[ "$state" == "deactivated" && -n "$start_time" ]]; then
+      if $IS_GNU_DATE; then
+        start_sec=$(date -d "$start_time" +%s)
+        end_sec=$(date -d "$timestamp" +%s)
+      else
+        start_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" +%s)
+        end_sec=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s)
+      fi
+      date_key=${timestamp:0:10}
+      duration=$((end_sec - start_sec))
+      (( durations["$date_key"] += duration ))
+      start_time=""
+    fi
+  done < <(grep "\"project\": \"$project\"" "$LOG_FILE")
+
+    format_time() {
+    local sec=$1
+    local h=$(( sec / 3600 ))
+    local m=$(( (sec % 3600) / 60 ))
+    local s=$(( sec % 60 ))
+    echo "${h}h ${m}m ${s}s"
+  }
+
+  echo "Breakdown for '$project':"
+  for i in $(seq $((days - 1)) -1 0); do
+    if $IS_GNU_DATE; then
+      day=$(date -u -d "-$i day" +%Y-%m-%d)
+    else
+      day=$(date -u -v "-${i}d" +%Y-%m-%d)
+    fi
+    dur=${durations[$day]:-0}
+    echo "  $day: $(format_time $dur)"
+  done
+}
+
+
+generate_csv_report() {
+  local project="$1"
+  local start_date="$2"
+  local end_date="$3"
+  local out_dir="$4"
+
+  local csv_content=""
+  local start_label="${start_date:-Start}"
+  local end_label="${end_date:-Now}"
+  out_dir="${out_dir:-.}"
+
+  csv_content+="startDayTime,endDayTime,timeElapsedSeconds,startComment,endComment\n"
+
+  mapfile -t lines < <(grep "\"project\": \"$project\"" "$LOG_FILE")
+
+  local activated_ts=""
+  local activated_comment=""
+  local deactivated_ts=""
+  local deactivated_comment=""
+
+  for line in "${lines[@]}"; do
+    state=$(echo "$line" | grep -o '"state": *"[^"]*"' | cut -d'"' -f4)
+    ts=$(echo "$line" | grep -o '"timestamp": *"[^"]*"' | cut -d'"' -f4)
+    comment=$(echo "$line" | grep -o '"comment": *"[^"]*"' | sed -E 's/.*"comment": *"([^"]*)".*/\1/')
+
+    date_only=${ts:0:10}
+    if [[ -n "$start_date" && "$date_only" < "$start_date" ]]; then continue; fi
+    if [[ -n "$end_date" && "$date_only" > "$end_date" ]]; then continue; fi
+
+    if [[ "$state" == "activated" ]]; then
+      activated_ts="$ts"
+      activated_comment="$comment"
+      deactivated_ts=""
+      deactivated_comment=""
+    elif [[ "$state" == "deactivated" && -n "$activated_ts" ]]; then
+      deactivated_ts="$ts"
+      deactivated_comment="$comment"
+
+      if date -d "$activated_ts" +%s >/dev/null 2>&1; then
+        start_epoch=$(date -d "$activated_ts" +%s)
+        end_epoch=$(date -d "$deactivated_ts" +%s)
+      else
+        start_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$activated_ts" +%s)
+        end_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$deactivated_ts" +%s)
+      fi
+
+      elapsed=$(( end_epoch - start_epoch ))
+
+      # Escape double quotes and commas for CSV
+      sc="${activated_comment//\"/\"\"}"
+      ec="${deactivated_comment//\"/\"\"}"
+      sc="${sc//,/;}"
+      ec="${ec//,/;}"
+
+      csv_content+="\"$activated_ts\",\"$deactivated_ts\",$elapsed,\"$sc\",\"$ec\"\n"
+      activated_ts=""
+    fi
+  done
+
+  if [[ -n "$out_dir" ]]; then
+    mkdir -p "$out_dir" || { echo "Failed to create directory $out_dir"; return 1; }
+    local filename="$out_dir/${project}_${start_label}_${end_label}_report.csv"
+    echo -e "$csv_content" > "$filename"
+    echo "Report saved to $filename"
+  else
+    echo -e "$csv_content"
+  fi
+}
+
+
+
+# Argument parsing
+case "$1" in
+  -h)
+    show_help; exit 0 ;;
+  -v)
+     echo "$VERSION"; exit 0 ;;
+  -a)
+    list_projects; exit 0 ;;
+  -r)
+    [[ -z "$2" ]] && echo "Error: Please provide a project name." && exit 1
+    register_project "$2"; exit 0 ;;
+  -l)
+    [[ -z "$2" ]] && echo "Error: Please provide a project name." && exit 1
+    project_exists "$2" || { echo "Project not registered."; exit 1; }
+    calculate_total_time "$2"; exit 0 ;;
+  -d)
+    [[ -z "$2" ]] && echo "Error: Please provide a project name." && exit 1
+    project_exists "$2" || { echo "Project not registered."; exit 1; }
+    delete_last_session "$2"; exit 0 ;;
+  -m)
+    if [[ -z "$2" || -z "$3" ]]; then
+      echo "Error: Provide project and duration (e.g. -m proj 1h30m)."
+      exit 1
+    fi
+    project="$2"
+    duration="$3"
+    shift 3
+
+    from_time=""
+    comment_a=""
+    comment_d=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --from)
+         if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: --from requires a non-empty argument."
+            exit 1
+          fi
+          from_time="$2"
+          shift 2
+          ;;
+        -ca)
+          if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: --ca requires a non-empty argument."
+            exit 1
+          fi
+          comment_a="$2"
+          shift 2
+          ;;
+        -cd)
+          if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: --cd requires a non-empty argument."
+            exit 1
+          fi
+          comment_d="$2"
+          shift 2
+          ;;
+        *)
+          echo "Unknown argument: $1"
+          exit 1
+          ;;
+      esac
+    done
+
+    manual_add_time "$project" "$duration" "$from_time" "$comment_a" "$comment_d"
+    exit 0
+    ;;
+  -s)
+    if [[ -z "$2" ]]; then
+      echo "Error: Please provide a project name."
+      exit 1
+    fi
+    project="$2"
+    if ! project_exists "$project"; then
+      echo "Project not registered."
+      exit 1
+    fi
+
+    case "$3" in
+      --date)
+        if [[ -z "$4" || "$4" == -* ]]; then
+          echo "Error: --date requires a non-empty argument."
+          exit 1
+        fi
+        calculate_summary "$project" "$4"
+        ;;
+      --today)
+        daily_breakdown "$project" 1
+        ;;
+      --week)
+        daily_breakdown "$project" 7
+        ;;
+      "")
+        calculate_summary "$project"
+        ;;
+      *)
+        echo "Invalid flag. Use --date YYYY-MM-DD, --today or --week"
+        ;;
+    esac
+    exit 0
+    ;;
+  -rpt)
+    if [[ -z "$2" ]]; then
+      echo "Error: Provide project name."
+      exit 1
+    fi
+    project="$2"
+    shift 2
+
+    start_date=""
+    end_date=""
+    out_dir=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --start)
+          if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: --start requires a non-empty argument."
+            exit 1
+          fi
+          start_date="$2"
+          shift 2
+          ;;
+        --end)
+          if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: --end requires a non-empty argument."
+            exit 1
+          fi
+          end_date="$2"
+          shift 2
+          ;;
+        -d)
+          if [[ -z "$2" || "$2" == -* ]]; then
+            echo "Error: -d requires a non-empty argument."
+            exit 1
+          fi
+          out_dir="$2"
+          shift 2
+          ;;
+        *)
+          echo "Unknown argument: $1"
+          exit 1
+          ;;
+      esac
+    done
+
+    generate_csv_report "$project" "$start_date" "$end_date" "$out_dir"
+    exit 0
+    ;;
+  -*)
+    show_help; exit 1 ;;
+esac
+
+# Must have at least one argument (the project name)
+if [[ $# -lt 1 ]]; then
+  echo "Error: Must provide a project name."
+  exit 1
+fi
+
+project="$1"
+comment=""
+
+# Optional: check if there's a -c flag and comment
+if [[ "$2" == "-c" && -n "$3" ]]; then
+  comment="$3"
+fi
+
+project_exists "$project" || { echo "Error: Project '$project' is not registered. Use -r to register."; exit 1; }
+
+last_state=$(get_last_state "$project")
+
+if [[ "$last_state" == "activated" ]]; then
+  log_event "$project" "deactivated" "" "$comment"
+  echo "Stopped work on '$project'."
+else
+  # Warn if other projects are active
+  active_projects=$(grep '"state": "activated"' "$LOG_FILE" | tail -n 50 | grep -o '"project": *"[^"]*"' | cut -d'"' -f4 | uniq)
+  for ap in $active_projects; do
+    if [[ "$ap" != "$project" ]]; then
+      echo "WARNING: Project '$ap' is still active. Consider deactivating it first."
+    fi
+  done
+  log_event "$project" "activated" "" "$comment"
+  echo "Started work on '$project'."
+fi
+

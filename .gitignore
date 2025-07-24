@@ -26,9 +26,6 @@ node_modules/
 # Homebrew install cache
 *.bottle.*
 
-# Ignore the final installed binary if it's generated
-track
-
 # VSCode or JetBrains IDE folders (optional)
 .vscode/
 .idea/
