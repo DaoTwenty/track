@@ -10,6 +10,6 @@ class Track < Formula
   end
 
   test do
-    system "#{bin}/track", "-h"
+    system "bin/track", "-h"
   end
 end
