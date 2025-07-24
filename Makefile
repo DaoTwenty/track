@@ -11,7 +11,6 @@ GIT_TAG     = v$(VERSION)
 install:
 	@echo "Installing $(SCRIPT_NAME) v$(VERSION) to $(INSTALL_DIR)..."
 	@mkdir -p "$(INSTALL_DIR)"
-	@ls -l
 	@sed "s/__VERSION__/$(VERSION)/" "$(SCRIPT_PATH)" > "$(INSTALL_DIR)/$(SCRIPT_NAME)"
 	@chmod +x "$(INSTALL_DIR)/$(SCRIPT_NAME)"
 	@echo "✅ Installed. Make sure $(INSTALL_DIR) is in your PATH."
